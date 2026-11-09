@@ -24,11 +24,11 @@ class FakeProvider {
     this.sends.push({ credentials, text, context, id }); return { ret: 0 };
   }
 }
-async function fixture(t) {
+async function fixture(t, mode = 'test') {
   const directory = mkdtempSync(join(tmpdir(), 'wechat-bridge-test-'));
   const provider = new FakeProvider();
   const config = { publicUrl: 'https://bridge.example.test/connect/', database: join(directory, 'test.sqlite'),
-    encryptionKey: randomBytes(32).toString('base64'), adminToken: 'admin-test-only', mode: 'test' };
+    encryptionKey: randomBytes(32).toString('base64'), adminToken: 'admin-test-only', mode };
   let bridge = new Bridge(config, provider);
   let port = await bridge.listen(0);
   const restart = async () => {
@@ -40,7 +40,7 @@ async function fixture(t) {
   const tokenA = bridge.store.createApplication('app-a', 'A'); const tokenB = bridge.store.createApplication('app-b', 'B');
   const a = bridge.store.owner('app-a', 'same-user-id').id; const b = bridge.store.owner('app-b', 'same-user-id').id;
   const bind = (owner, suffix) => bridge.store.bind(owner, { token: 'private-' + suffix, botId: 'bot-' + suffix,
-    userId: 'wechat-' + suffix, baseUrl: 'https://ilinkai.weixin.qq.com', context: '' }, '123456');
+    userId: 'wechat-' + suffix, baseUrl: 'https://ilinkai.weixin.qq.com', context: '' });
   const message = (suffix, id = 'm1') => ({ message_type: 1, from_user_id: 'wechat-' + suffix, to_user_id: 'bot-' + suffix,
     message_id: id, context_token: 'context-' + suffix, item_list: [{ type: 1, text_item: { text: 'sensitive question ' + suffix } }] });
   const call = async (path, { token, cookie, data, origin = 'https://bridge.example.test' } = {}) => {
@@ -50,11 +50,7 @@ async function fixture(t) {
     return { status: response.status, headers: response.headers, result: await response.json() };
   };
   const cookieFor = owner => '__Secure-wechat_bridge=' + bridge.store.redeem(bridge.store.invitation(owner));
-  const verify = async (owner, suffix, generation) => {
-    bridge.store.ingest(owner, generation, [message(suffix)], 'cursor');
-    await bridge.send(owner, 'receipt', `test:${generation}`, `context-${suffix}`, true);
-    assert.equal(bridge.store.confirmReceipt(owner, '123456'), true);
-  };
+  const receive = (owner, suffix, generation) => bridge.store.ingest(owner, generation, [message(suffix)], 'cursor');
   const cli = (args, text) => {
     const configPath = join(directory, 'config.json');
     const apps = join(directory, 'applications');
@@ -69,7 +65,7 @@ async function fixture(t) {
       child.stdin.end(text);
     });
   };
-  return { get bridge() { return bridge; }, provider, tokenA, tokenB, a, b, bind, message, call, cookieFor, verify, restart, cli };
+  return { get bridge() { return bridge; }, provider, tokenA, tokenB, a, b, bind, message, call, cookieFor, receive, restart, cli };
 }
 
 test('application and user scopes remain separate with matching user IDs', async t => {
@@ -112,36 +108,68 @@ test('messages deduplicate and the durable cursor advances', async t => {
   assert.equal(f.bridge.store.ingest(f.a, generation, [f.message('a')], 'cursor-2').length, 0);
   assert.equal(f.bridge.store.binding(f.a).credentials.cursor, 'cursor-2');
 });
-test('receipt confirmation requires both inbound and successful outbound', async t => {
-  const f = await fixture(t); const generation = f.bind(f.a, 'a');
-  assert.equal(f.bridge.store.confirmReceipt(f.a, '123456'), false);
-  f.bridge.store.ingest(f.a, generation, [f.message('a')], 'cursor');
-  assert.equal(f.bridge.store.confirmReceipt(f.a, '123456'), false);
-  await f.bridge.send(f.a, 'receipt 123456', 'receipt-test', 'context-a', true);
-  assert.equal(f.bridge.store.confirmReceipt(f.a, '654321'), false);
-  assert.equal(f.bridge.store.confirmReceipt(f.a, '123456'), true);
+test('WeChat confirmation connects immediately and the first message gets a test acknowledgment', { timeout: 5000 }, async t => {
+  const f = await fixture(t);
+  const cookie = f.cookieFor(f.a);
+  const officialCode = 'AB12';
+  f.provider.qrStatus = async (base, qr, code) => {
+    if (!code) return { status: 'need_verifycode' };
+    assert.equal(code, officialCode);
+    return { status: 'confirmed', bot_token: 'fake-token', ilink_bot_id: 'bot-a', ilink_user_id: 'wechat-a' };
+  };
+  const updates = Promise.withResolvers();
+  const update = f.provider.updates.bind(f.provider);
+  f.provider.updates = (credentials, signal) => Promise.race([
+    updates.promise,
+    update(credentials, signal),
+  ]);
+  const sent = Promise.withResolvers();
+  const send = f.provider.send.bind(f.provider);
+  f.provider.send = async (...args) => { const result = await send(...args); sent.resolve(); return result; };
+  const bind = await f.call('/connect/api/bind', { cookie, data: {} });
+  assert.equal(bind.result.login.state, 'need_verifycode');
+  assert.equal(bind.result.binding, null);
+  assert.equal((await f.call('/connect/api/verify-code', { cookie, data: { code: officialCode } })).status, 200);
+  await f.bridge.logins.get(f.a).task;
+  const connected = (await f.call('/connect/api/status', { cookie })).result.binding;
+  assert.equal(connected.state, 'connected');
+  assert.equal(connected.last_inbound, null);
+  assert.equal(connected.last_outbound, null);
+  assert.equal((await f.call('/connect/api/confirm-receipt', { cookie, data: { code: '123456' } })).status, 404);
+  const sendPath = '/connect/v1/users/same-user-id/send';
+  const notification = { token: f.tokenA, data: { text: 'notification', request_id: 'before-context' } };
+  assert.equal((await f.call(sendPath, notification)).result.error, 'interaction_required');
+
+  f.provider.updates = update;
+  updates.resolve({ msgs: [f.message('a')], get_updates_buf: 'cursor' });
+  await sent.promise;
+  const delivered = (await f.call('/connect/api/status', { cookie })).result.binding;
+  assert.equal(delivered.state, 'connected');
+  assert.ok(delivered.last_inbound);
+  assert.ok(delivered.last_outbound);
+  assert.equal(f.provider.sends[0].text, '微信通道已收到你的消息。');
+  assert.equal((await f.call(sendPath, notification)).status, 200);
 });
 test('outbound requests deduplicate and do not claim actual delivery', async t => {
   const f = await fixture(t); const generation = f.bind(f.a, 'a');
   f.bridge.store.ingest(f.a, generation, [f.message('a')], 'cursor');
-  const first = await f.bridge.send(f.a, 'receipt', 'request-1', 'context-a', true);
-  const second = await f.bridge.send(f.a, 'receipt', 'request-1', 'context-a', true);
+  const first = await f.bridge.send(f.a, 'notification', 'request-1', 'context-a');
+  const second = await f.bridge.send(f.a, 'notification', 'request-1', 'context-a');
   assert.equal(first.accepted_by_wechat, true); assert.equal(first.delivery_confirmed, false);
   assert.equal(second.duplicate, true); assert.equal(f.provider.sends.length, 1);
-  await assert.rejects(f.bridge.send(f.a, 'different message', 'request-1', 'context-a', true), /request_id_conflict/);
+  await assert.rejects(f.bridge.send(f.a, 'different message', 'request-1', 'context-a'), /request_id_conflict/);
 });
 test('uncertain sends cannot be blindly replayed', async t => {
   const f = await fixture(t); const generation = f.bind(f.a, 'a');
   f.bridge.store.ingest(f.a, generation, [f.message('a')], 'cursor'); f.provider.failure = 'timeout';
-  await assert.rejects(f.bridge.send(f.a, 'receipt', 'request-1', 'context-a', true), /send_failed/);
+  await assert.rejects(f.bridge.send(f.a, 'notification', 'request-1', 'context-a'), /send_failed/);
   f.provider.failure = null;
-  await assert.rejects(f.bridge.send(f.a, 'receipt', 'request-1', 'context-a', true), /previous_send_uncertain_or_failed/);
+  await assert.rejects(f.bridge.send(f.a, 'notification', 'request-1', 'context-a'), /previous_send_uncertain_or_failed/);
   assert.equal(f.provider.sends.length, 0);
 });
 test('cross-application event access and replies are rejected', async t => {
   const f = await fixture(t); const generation = f.bind(f.a, 'a');
-  await f.verify(f.a, 'a', generation);
-  const [event] = f.bridge.store.ingest(f.a, generation, [f.message('a', 'm2')], 'cursor');
+  const [event] = f.receive(f.a, 'a', generation);
   assert.equal((await f.call('/connect/v1/events', { token: f.tokenA })).result.events.length, 1);
   assert.equal((await f.call('/connect/v1/events', { token: f.tokenB })).result.events.length, 0);
   assert.equal((await f.call(`/connect/v1/events/${event.id}/reply`, { token: f.tokenB, data: { text: 'wrong', request_id: 'reply-1' } })).status, 404);
@@ -218,7 +246,7 @@ test('a confirmation returned after QR expiry cannot bind an account', async t =
 
 test('an in-flight send and queued sends cannot complete on a replacement binding', async t => {
   const f = await fixture(t);
-  await f.verify(f.a, 'a', f.bind(f.a, 'a'));
+  f.receive(f.a, 'a', f.bind(f.a, 'a'));
   const started = Promise.withResolvers();
   const response = Promise.withResolvers();
   const send = f.provider.send.bind(f.provider);
@@ -231,8 +259,8 @@ test('an in-flight send and queued sends cannot complete on a replacement bindin
   response.resolve({ ret: 0 });
   await Promise.all([first, queued]);
   assert.equal(f.bridge.store.binding(f.a).last_outbound, null);
-  assert.equal(f.provider.sends.length, 1);
-  await f.verify(f.a, 'replacement', generation);
+  assert.equal(f.provider.sends.length, 0);
+  f.receive(f.a, 'replacement', generation);
   await f.bridge.send(f.a, 'new message', 'new-1');
   assert.equal(f.provider.sends.at(-1).credentials.userId, 'wechat-replacement');
 });
@@ -240,7 +268,7 @@ test('an in-flight send and queued sends cannot complete on a replacement bindin
 test('accepted and crash-pending request IDs survive restart without sending again', async t => {
   const f = await fixture(t);
   const generation = f.bind(f.a, 'a');
-  await f.verify(f.a, 'a', generation);
+  f.receive(f.a, 'a', generation);
   await f.bridge.send(f.a, 'accepted', 'accepted-1');
   // Simulate a process interrupted after reserving the ID and before recording a provider outcome.
   f.bridge.store.db.prepare('INSERT INTO outbound VALUES(?,?,?,?,?,?,?)')
@@ -248,47 +276,68 @@ test('accepted and crash-pending request IDs survive restart without sending aga
   await f.restart();
   assert.equal((await f.bridge.send(f.a, 'accepted', 'accepted-1')).duplicate, true);
   await assert.rejects(f.bridge.send(f.a, 'pending', 'pending-1'), /previous_send_uncertain_or_failed/);
-  assert.equal(f.provider.sends.length, 2);
+  assert.equal(f.provider.sends.length, 1);
 });
 
 test('unbind removes message data and keeps dispatched request IDs from being replayed after rebind', async t => {
   const f = await fixture(t);
-  await f.verify(f.a, 'a', f.bind(f.a, 'a'));
+  f.receive(f.a, 'a', f.bind(f.a, 'a'));
   await f.bridge.send(f.a, 'old notification', 'old-1');
   await f.call('/connect/api/unbind', { cookie: f.cookieFor(f.a), data: {} });
   const row = f.bridge.store.db.prepare('SELECT payload_hash,client_id,state FROM outbound WHERE owner=? AND request_id=?').get(f.a, 'old-1');
   assert.deepEqual({ ...row }, { payload_hash: '', client_id: '', state: 'unbound' });
-  await f.verify(f.a, 'replacement', f.bind(f.a, 'replacement'));
+  f.receive(f.a, 'replacement', f.bind(f.a, 'replacement'));
   await assert.rejects(f.bridge.send(f.a, 'old notification', 'old-1'), /request_id_conflict/);
-  assert.equal(f.provider.sends.length, 3);
+  assert.equal(f.provider.sends.length, 1);
 });
 
-test('verification traffic stays private and later events follow the application cursor', async t => {
-  const f = await fixture(t);
-  const generation = f.bind(f.a, 'a');
-  const other = f.bridge.store.owner('app-a', 'other-user').id;
-  const otherGeneration = f.bind(other, 'other');
-  const [setup] = f.bridge.store.ingest(f.a, generation, [f.message('a')], 'cursor');
-  await f.verify(other, 'other', otherGeneration);
-  const [otherEvent] = f.bridge.store.ingest(other, otherGeneration, [f.message('other', 'm2')], 'cursor');
-  assert.deepEqual(f.bridge.store.events('app-a').map(event => event.id), [otherEvent.id]);
+test('legacy authorized accounts keep their context, history, and event visibility on upgrade', async t => {
+  const f = await fixture(t, 'relay');
+  const waiting = f.bind(f.a, 'a');
+  const complete = f.bind(f.b, 'b');
+  const [privateA] = f.receive(f.a, 'a', waiting);
+  const [privateB] = f.receive(f.b, 'b', complete);
+  const [publicB] = f.bridge.store.ingest(f.b, complete, [f.message('b', 'm2')], 'cursor-2');
+  await f.bridge.send(f.b, 'previous notification', 'before-upgrade');
 
-  await f.verify(f.a, 'a', generation);
-  const [event] = f.bridge.store.ingest(f.a, generation, [f.message('a', 'm2')], 'cursor');
-  assert.equal(f.bridge.store.confirmReceipt(f.a, '123456'), true);
-  assert.deepEqual(f.bridge.store.events('app-a', otherEvent.id).map(event => event.id), [event.id]);
-  assert.equal((await f.call(`/connect/v1/events/${setup.id}/reply`, {
-    token: f.tokenA, data: { text: 'unexpected reply', request_id: 'guess-1' },
+  const store = f.bridge.store;
+  const legacy = store.db.prepare('UPDATE bindings SET credentials=?,receipt_hash=?,verified=?,relay_after=? WHERE owner=?');
+  const oldA = store.binding(f.a);
+  const oldB = store.binding(f.b);
+  legacy.run(store.encrypt({ ...oldA.credentials, receipt: '123456' }), hash('123456'), 0, 0, f.a);
+  legacy.run(store.encrypt({ ...oldB.credentials, receipt: '654321' }), hash('654321'), 1, privateB.id, f.b);
+
+  await f.restart();
+  for (const [owner, previous] of [[f.a, oldA], [f.b, oldB]]) {
+    const current = f.bridge.store.binding(owner);
+    assert.deepEqual(current.credentials, previous.credentials);
+    for (const field of ['generation', 'connected', 'last_inbound', 'last_outbound', 'error']) {
+      assert.equal(current[field], previous[field]);
+    }
+    assert.equal(f.bridge.publicStatus(owner).binding.state, 'connected');
+    assert.equal(current.receipt_hash, '');
+    assert.equal(current.verified, 1);
+  }
+  assert.equal(f.bridge.store.db.prepare('SELECT COUNT(*) n FROM events').get().n, 3);
+  assert.deepEqual(f.bridge.store.events('app-a'), []);
+  assert.deepEqual(f.bridge.store.events('app-b').map(event => event.id), [publicB.id]);
+  assert.equal((await f.bridge.send(f.b, 'previous notification', 'before-upgrade')).duplicate, true);
+  assert.equal((await f.call(`/connect/v1/events/${privateA.id}/reply`, {
+    token: f.tokenA, data: { text: 'hidden reply', request_id: 'reply-1' },
   })).status, 404);
-  assert.equal((await f.call(`/connect/v1/events/${event.id}/reply`, {
-    token: f.tokenA, data: { text: 'actual reply', request_id: 'reply-1' },
+
+  const [newA] = f.bridge.store.ingest(f.a, waiting, [f.message('a', 'm2')], 'cursor-2');
+  await f.restart();
+  assert.deepEqual(f.bridge.store.events('app-a').map(event => event.id), [newA.id]);
+  assert.equal((await f.call(`/connect/v1/events/${newA.id}/reply`, {
+    token: f.tokenA, data: { text: 'actual reply', request_id: 'reply-2' },
   })).status, 200);
 });
 
 test('upgrading an existing database preserves verified events and message deduplication', async t => {
   const f = await fixture(t);
   const generation = f.bind(f.a, 'a');
-  await f.verify(f.a, 'a', generation);
+  f.receive(f.a, 'a', generation);
   const [event] = f.bridge.store.ingest(f.a, generation, [f.message('a', 'm2')], 'cursor');
   f.bridge.store.db.prepare("UPDATE events SET message_key='m2' WHERE id=?").run(event.id);
   f.bridge.store.db.exec('ALTER TABLE bindings DROP COLUMN relay_after');
@@ -299,13 +348,13 @@ test('upgrading an existing database preserves verified events and message dedup
 
 test('notification CLI reads stdin and safely retries with the same request ID', async t => {
   const f = await fixture(t);
-  await f.verify(f.a, 'a', f.bind(f.a, 'a'));
+  f.receive(f.a, 'a', f.bind(f.a, 'a'));
   const args = ['send', 'app-a', 'same-user-id', 'notice-1'];
   const text = 'First line\nSecond line';
   const first = await f.cli(args, text);
   const duplicate = await f.cli(args, text);
   assert.deepEqual(first, { accepted_by_wechat: true, delivery_confirmed: false });
   assert.equal(duplicate.duplicate, true);
-  assert.equal(f.provider.sends.length, 2);
+  assert.equal(f.provider.sends.length, 1);
   assert.equal(f.provider.sends.at(-1).text, text);
 });

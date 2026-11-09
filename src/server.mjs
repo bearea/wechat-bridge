@@ -2,7 +2,7 @@ import http from 'node:http';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomInt, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import QRCode from 'qrcode';
 import { Store, hash, now } from './store.mjs';
 import { Weixin, safeBase } from './weixin.mjs';
@@ -58,7 +58,7 @@ export class Bridge {
     const login = this.logins.get(owner);
     const binding = owner ? this.store.binding(owner) : null;
     return { mode: this.config.mode, login: login ? { state: login.state, expires_at: login.expires } : null,
-      binding: binding ? { state: binding.verified ? 'verified' : binding.last_inbound ? 'confirm_receipt' : 'awaiting_message',
+      binding: binding ? { state: 'connected',
         connected_at: binding.connected, last_inbound: binding.last_inbound, last_outbound: binding.last_outbound, error: binding.error } : null };
   }
   browserOwner(req) {
@@ -131,12 +131,6 @@ export class Bridge {
       this.limit(`provider-code:${owner}`, 5, 300000);
       login.code = input.code; login.state = 'scaned'; return this.json(res, 200, { ok: true });
     }
-    if (route === 'api/confirm-receipt' && method === 'POST') {
-      this.limit(`receipt:${owner}`, 8, 300000); const input = await body(req);
-      check(typeof input.code === 'string' && /^\d{6}$/.test(input.code));
-      check(this.store.confirmReceipt(owner, input.code), 'receipt_not_matched', 400);
-      return this.json(res, 200, this.publicStatus(owner));
-    }
     if (route === 'api/unbind' && method === 'POST') {
       await body(req); this.stopOwner(owner); this.store.unbind(owner); return this.json(res, 200, { ok: true });
     }
@@ -160,7 +154,7 @@ export class Bridge {
     if (parts.length === 3 && parts[0] === 'users' && parts[2] === 'send' && req.method === 'POST') {
       const input = await body(req); const id = decodeURIComponent(parts[1]); check(userId(id));
       const owner = this.store.findOwner(application.id, id)?.id;
-      check(owner, 'binding_not_verified', 409);
+      check(owner, 'binding_not_connected', 409);
       this.limit(`send:${owner}`, 8);
       const result = await this.send(owner, input.text, input.request_id);
       return this.json(res, 200, result);
@@ -174,7 +168,7 @@ export class Bridge {
       const event = this.store.db.prepare('SELECT e.* FROM events e JOIN owners o ON o.id=e.owner WHERE e.id=? AND o.application=?').get(Number(parts[1]), application.id);
       check(event, 'event_not_found', 404);
       const binding = this.store.binding(event.owner);
-      check(binding?.verified && binding.generation === event.generation, 'binding_changed', 409);
+      check(binding?.generation === event.generation, 'binding_changed', 409);
       check(event.id > binding.relay_after, 'event_not_found', 404);
       this.limit(`send:${event.owner}`, 8);
       return this.json(res, 200, await this.send(event.owner, input.text, input.request_id, this.store.decrypt(event.payload).context));
@@ -231,7 +225,7 @@ export class Bridge {
           check([result.bot_token, result.ilink_bot_id, result.ilink_user_id].every(value => typeof value === 'string' && value.length > 0), 'incomplete_binding', 502);
           const credentials = { token: result.bot_token, botId: result.ilink_bot_id, userId: result.ilink_user_id,
             baseUrl: safeBase(result.baseurl || login.base), cursor: '', context: '' };
-          this.store.bind(owner, credentials, String(randomInt(100000, 1000000)));
+          this.store.bind(owner, credentials);
           this.workers.get(owner)?.controller.abort(); this.workers.delete(owner);
           login.state = 'connected'; login.image = null; this.startWorker(owner); return;
         } else if (result.status === 'binded_redirect') {
@@ -266,15 +260,13 @@ export class Bridge {
         const events = this.store.ingest(owner, worker.generation, result.msgs || [], result.get_updates_buf);
         failures = 0;
         if (binding.error === 'network_retry') this.store.clearNetworkError(owner, worker.generation);
-        for (const event of events) {
-          if (!event.context) continue;
-          const current = this.store.binding(owner);
-          if (!current || current.generation !== worker.generation) break;
-          if (this.config.mode === 'test' || !current.verified) {
-            const text = current.verified ? '微信通道已收到你的消息。当前为连接测试模式，聊天服务尚未接入。' :
-              `微信通道连接测试成功。请在绑定页面输入回执码：${current.credentials.receipt}。聊天服务尚未接入。`;
-            try { await this.send(owner, text, `test:${worker.generation}:${event.id}`, event.context, true); }
-            catch { /* A failed outbound is visible in status; do not claim delivery. */ }
+        if (this.config.mode === 'test') {
+          for (const event of events) {
+            if (!event.context) continue;
+            const current = this.store.binding(owner);
+            if (current?.generation !== worker.generation) break;
+            try { await this.send(owner, '微信通道已收到你的消息。', `test:${worker.generation}:${event.id}`, event.context, true); }
+            catch { /* A failed outbound is visible in status. */ }
           }
         }
       } catch (error) {
@@ -289,12 +281,12 @@ export class Bridge {
       await sleep(300, signal);
     }
   }
-  async send(owner, text, id, context, test = false) {
+  async send(owner, text, id, context, internal = false) {
     check(validText(text)); check(requestId(id), 'request_id_required');
-    check(test || !id.startsWith('test:'), 'request_id_reserved');
+    check(internal || !id.startsWith('test:'), 'request_id_reserved');
     check(!this.closing, 'service_unavailable', 503);
     const initial = this.store.binding(owner);
-    check(initial && (test || initial.verified), 'binding_not_verified', 409);
+    check(initial, 'binding_not_connected', 409);
     const generation = initial.generation;
     const previous = this.queues.get(owner) || Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {

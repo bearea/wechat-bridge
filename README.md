@@ -8,13 +8,13 @@ This is an independent project, not a Tencent product or an official hosted inte
 
 - Short-lived, one-use binding invitations associated with an application's user.
 - Browser binding page with QR authorization and optional WeChat verification challenges.
-- A six-digit receipt sent through WeChat and entered in the browser to verify real message receipt.
+- The connection is ready once WeChat confirms QR authorization. The bridge tracks inbound messages and outbound API acceptance separately.
 - Separate API credentials and user namespaces for each application.
 - Per-account long polling, sender checks, encrypted credentials and message bodies, and persistent message deduplication.
 - APIs for reading incoming text events, replying to an event, and sending notifications.
 - Local unbinding, connection error reporting, bounded event retention, and process resource limits.
 
-`test` mode replies with fixed connection acknowledgments. It does not call a model or application backend. `relay` mode exposes verified incoming messages to an authorized application's event consumer. No existing application, including Glean, needs modification to test this service independently.
+`test` mode replies with fixed connection acknowledgments. It does not call a model or application backend. `relay` mode exposes incoming messages from active bindings to an authorized application's event consumer. No existing application, including Glean, needs modification to test this service independently.
 
 ```mermaid
 flowchart LR
@@ -33,14 +33,14 @@ npm run check
 npm test
 ```
 
-Tests use a fake provider. They verify authorization boundaries, account separation, encrypted storage, deduplication, confirmation rules, and failure handling without contacting WeChat or sending real messages.
+Tests use a fake provider. They verify authorization boundaries, account separation, encrypted storage, deduplication, authorization flow, and failure handling without contacting WeChat or sending real messages.
 
 For deployment, see [deployment instructions](docs/DEPLOYMENT.md). Applications integrate using the [HTTP API](docs/API.md).
 
 ## Important boundaries
 
 1. **One WeChat account currently has one active application/user binding.** Another application cannot silently take it over. Sharing one personal connection across multiple applications requires an explicit user grant and chat routing design; that feature is not implemented yet. Multiple applications with separate bound accounts are supported by the API and storage model.
-2. QR authorization and successful API responses are not delivery receipts. Only entering the code actually received in WeChat completes initial verification. Real multi-account acceptance testing still needs distinct consenting WeChat accounts.
+2. QR authorization establishes a connection. To verify end-to-end messaging, send a message in WeChat and check for the reply on the phone.
 3. ClawBot sending uses conversation context and may require renewed user interaction. This service is not an unconditional, around-the-clock emergency notification channel. Provider quotas, account eligibility and disconnect behavior remain subject to WeChat.
 4. This implementation supports **text**. It recognizes other inbound items but does not download media, transcribe voice, support groups, or grant access to unrelated WeChat conversations.
 5. Unbinding stops local workers and deletes local account credentials and stored events. It does not claim to revoke an authorization on Tencent's servers; manage provider authorization in WeChat as needed.

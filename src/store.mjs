@@ -22,6 +22,24 @@ export class Store {
     if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'relay_after')) {
       this.db.exec('ALTER TABLE bindings ADD COLUMN relay_after INTEGER NOT NULL DEFAULT 0');
     }
+    this.migrateLegacyBindings();
+  }
+  migrateLegacyBindings() {
+    // Keep the legacy columns readable by the previous release during a rollback.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const bindings = this.db.prepare("SELECT owner,credentials FROM bindings WHERE verified=0 OR receipt_hash<>''").all();
+      const update = this.db.prepare(`UPDATE bindings SET credentials=?,receipt_hash='',verified=1,
+        relay_after=CASE WHEN verified=0 THEN COALESCE(
+          (SELECT MAX(id) FROM events WHERE owner=bindings.owner AND generation=bindings.generation), relay_after)
+          ELSE relay_after END WHERE owner=?`);
+      for (const row of bindings) {
+        const credentials = this.decrypt(row.credentials);
+        delete credentials.receipt;
+        update.run(this.encrypt(credentials), row.owner);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   encrypt(value) {
     const iv = randomBytes(12);
@@ -73,15 +91,15 @@ export class Store {
     const row = this.db.prepare('SELECT * FROM bindings WHERE owner=?').get(owner);
     return row ? { ...row, credentials: this.decrypt(row.credentials) } : null;
   }
-  bind(owner, credentials, receipt) {
+  bind(owner, credentials) {
     const generation = randomUUID();
     const conflict = this.db.prepare('SELECT owner FROM bindings WHERE wechat_hash=? AND owner<>?').get(hash(credentials.userId), owner);
     if (conflict) throw new Error('wechat_already_bound');
-    this.db.prepare(`INSERT INTO bindings(owner,wechat_hash,generation,credentials,receipt_hash,connected)
-      VALUES(?,?,?,?,?,?) ON CONFLICT(owner) DO UPDATE SET wechat_hash=excluded.wechat_hash,
+    this.db.prepare(`INSERT INTO bindings(owner,wechat_hash,generation,credentials,receipt_hash,verified,connected)
+      VALUES(?,?,?,?,'',1,?) ON CONFLICT(owner) DO UPDATE SET wechat_hash=excluded.wechat_hash,
       generation=excluded.generation,credentials=excluded.credentials,receipt_hash=excluded.receipt_hash,
-      connected=excluded.connected,verified=0,last_inbound=NULL,last_outbound=NULL,error=NULL,relay_after=0`)
-      .run(owner, hash(credentials.userId), generation, this.encrypt({ ...credentials, receipt }), hash(receipt), now());
+      connected=excluded.connected,verified=1,last_inbound=NULL,last_outbound=NULL,error=NULL,relay_after=0`)
+      .run(owner, hash(credentials.userId), generation, this.encrypt(credentials), now());
     return generation;
   }
   updateCredentials(owner, generation, credentials) {
@@ -100,11 +118,6 @@ export class Store {
       this.db.prepare('UPDATE bindings SET last_outbound=?,error=NULL WHERE owner=? AND generation=?').run(now(), owner, generation);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
-  }
-  confirmReceipt(owner, code) {
-    return this.db.prepare(`UPDATE bindings SET relay_after=CASE WHEN verified=1 THEN relay_after ELSE
-      COALESCE((SELECT MAX(id) FROM events WHERE owner=bindings.owner AND generation=bindings.generation),0) END,verified=1
-      WHERE owner=? AND receipt_hash=? AND last_inbound IS NOT NULL AND last_outbound IS NOT NULL`).run(owner, hash(code)).changes > 0;
   }
   unbind(owner) {
     this.db.exec('BEGIN IMMEDIATE');
@@ -147,7 +160,7 @@ export class Store {
   events(application, after = 0, limit = 100) {
     return this.db.prepare(`SELECT e.*,o.external_id FROM events e JOIN owners o ON e.owner=o.id
       JOIN bindings b ON b.owner=e.owner AND b.generation=e.generation
-      WHERE o.application=? AND e.id>? AND e.id>b.relay_after AND b.verified=1 ORDER BY e.id LIMIT ?`).all(application, after, limit)
+      WHERE o.application=? AND e.id>? AND e.id>b.relay_after ORDER BY e.id LIMIT ?`).all(application, after, limit)
       .map(row => {
         const { text, media } = this.decrypt(row.payload);
         return { id: row.id, user_id: row.external_id, created_at: row.created, text, media_unsupported: media };

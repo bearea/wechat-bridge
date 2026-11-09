@@ -32,7 +32,7 @@ Adjust the unit if your host uses other locations. The historical directory name
    ```
 
    Application credentials are stored privately beside server configuration. The second command prints a one-use binding URL; give it only to its intended user.
-7. The user opens the URL, generates the QR code, scans it using WeChat and confirms authorization. If WeChat requests a pairing code, submit it through the page. The user then sends `测试` to the ClawBot and enters the six-digit code received in the reply. Until that succeeds, do not report the channel as verified.
+7. The user opens the URL, generates the QR code, scans it using WeChat and confirms authorization. If WeChat requests a pairing code, submit it through the page. The page shows the connection as soon as WeChat confirms authorization. To check message delivery in test mode, send `测试` in the ClawBot conversation and look for the acknowledgment on the phone.
 
 ## Existing-application integration
 
@@ -43,6 +43,8 @@ Switch configuration `mode` to `relay` and restart only when the consumer is rea
 For automated notifications, use the `send` command shown in the [API instructions](API.md). Run it where the application credential is available, and reuse the same request ID when retrying one notification.
 
 ## Operation and rollback
+
+Existing authorized connections carry over on upgrade, including connections left waiting for the old confirmation step. The migration preserves their credentials, conversation context, and message timestamps.
 
 Check `systemctl status wechat-bridge` and `journalctl -u wechat-bridge`. Logs intentionally omit tokens and message contents. The supplied process limits are 192 MiB RAM, 64 MiB swap and 25% of one CPU. Actual idle memory must be checked on the target host.
 

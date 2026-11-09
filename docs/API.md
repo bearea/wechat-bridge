@@ -12,19 +12,19 @@ Authenticate from your **backend** using `Authorization: Bearer APPLICATION_TOKE
 {"user_id":"account-123"}
 ```
 
-Returns HTTP 201 with `url` and `expires_in: 1800`. Show the returned URL only to that authenticated user. The browser opens the invitation, creates a private session, generates a provider QR code, waits for authorization, and verifies a receipt through WeChat. Do not log the returned URL.
+Returns HTTP 201 with `url` and `expires_in: 1800`. Show the returned URL only to that authenticated user. The browser opens the invitation, creates a private session, generates a provider QR code, and waits for WeChat to confirm authorization. If WeChat requests a pairing code, submit it in the browser. Do not log the returned URL.
 
 ## Read status
 
 `GET v1/users/account-123/status`
 
-The response includes `mode`, optional `login`, and optional `binding`. A binding's state is `awaiting_message`, `confirm_receipt` or `verified`. `last_inbound` and `last_outbound` are Unix timestamps in milliseconds. `error` describes current transport problems. Tokens and provider conversation identifiers are never returned.
+The response includes `mode`, optional `login`, and optional `binding`. A binding's state is `connected` once WeChat confirms authorization. `last_inbound` records the last incoming message and `last_outbound` records the last outgoing message accepted by WeChat. Both are Unix timestamps in milliseconds and may be null. `error` describes current transport problems, including whether the authorization needs renewal. Tokens and provider conversation identifiers are never returned.
 
 ## Consume incoming text
 
 `GET v1/events?after=0`
 
-Returns up to 100 events in increasing `id` order from this application's current bindings. Messages received during setup are used for verification. Only messages received after receipt confirmation enter the application event stream.
+Returns up to 100 events in increasing `id` order from this application's current bindings. Messages from new bindings enter the event stream as soon as the connection is established. Messages withheld by the old setup flow stay private after an upgrade.
 
 ```json
 {"events":[{"id":12,"user_id":"account-123","created_at":1790000000000,"text":"Hello","media_unsupported":false}]}
@@ -50,7 +50,7 @@ The bridge derives the recipient and conversation context from the event. It che
 {"request_id":"task-567-completed","text":"Your task has finished."}
 ```
 
-Requires a verified binding and an existing conversation context. The supplied CLI can read notification text from stdin and use the application's stored credential.
+Requires a connected binding and an existing conversation context. The supplied CLI can read notification text from stdin and use the application's stored credential.
 
 ```sh
 printf '%s' 'Disk usage reached 85% on the example host.' |
@@ -71,7 +71,7 @@ This reports provider API acceptance, not proof of handset delivery. Repeating a
 
 The bridge records the request ID before contacting WeChat. Requests left pending across a crash, and sends that timed out or failed, return `previous_send_uncertain_or_failed` on replay. Check the outcome before deciding whether to send again. Deduplication records expire after seven days. After unlinking, only the ID and deduplication metadata remain for the rest of that window. A queued request rejected with `binding_changed` should be discarded, since its recipient may have changed.
 
-Common errors include `application_auth_required` (401), `event_not_found` (404), `binding_not_verified`, `binding_changed`, `request_id_conflict` (409), `rate_limited` (429), and `send_failed` (502). `interaction_required` can indicate a missing context (409) or a context rejected by WeChat (502). Browser management endpoints additionally enforce the configured Origin and private session cookie.
+Common errors include `application_auth_required` (401), `event_not_found` (404), `binding_not_connected`, `binding_changed`, `request_id_conflict` (409), `rate_limited` (429), and `send_failed` (502). `interaction_required` can indicate a missing context (409) or a context rejected by WeChat (502). Browser management endpoints additionally enforce the configured Origin and private session cookie.
 
 ## Administration
 

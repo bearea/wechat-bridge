@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const errors = { session_required: '请使用服务提供的专属绑定链接打开此页。', invitation_expired_or_used: '绑定链接已使用或已过期，请重新获取。', receipt_not_matched: '回执码未匹配，请检查微信收到的六位数字。', rate_limited: '操作较频繁，请稍后重试。', service_unavailable: '服务暂不可用，请稍后重试。', invalid_request: '请检查输入内容。', no_verification_pending: '当前无需提交配对码。' };
+const errors = { session_required: '请使用服务提供的专属绑定链接打开此页。', invitation_expired_or_used: '绑定链接已使用或已过期，请重新获取。', rate_limited: '操作较频繁，请稍后重试。', service_unavailable: '服务暂不可用，请稍后重试。', invalid_request: '请检查输入内容。', no_verification_pending: '当前无需提交配对码。' };
 const api = async (path, data) => {
   const response = await fetch('api/' + path, { method: data === undefined ? 'GET' : 'POST',
     credentials: 'same-origin', headers: data === undefined ? {} : { 'Content-Type': 'application/json' },
@@ -22,18 +22,18 @@ function render(data) {
     title = '本次绑定未完成'; detail = login.state === 'already_bound_elsewhere' ? '这个微信已关联其他应用账号。请先解除原连接，或使用另一个微信。' : '微信未完成授权。请重新生成二维码并按手机提示操作。';
   }
   if (binding && !starting && !qrActive) {
-    title = binding.state === 'verified' ? '微信通道已验证' : binding.state === 'confirm_receipt' ? '请确认微信回执' : '微信授权完成，等待收发验证';
-    detail = binding.state === 'verified' ? '已验证双向收发。当前为通道测试模式，聊天服务尚未接入。' : '请在微信 ClawBot 对话里发送“测试”，再把收到的六位回执码填到下方。';
-    if (binding.error) {
-      title = binding.error === 'rebind_required' ? '微信连接需要重新绑定' : '微信通道暂未完成收发';
-      detail = binding.error === 'interaction_required' ? '请在微信 ClawBot 里主动发一条消息，以更新会话。' : binding.error === 'send_failed' ? '已收到消息，但微信回复发送未确认。请稍后在微信里再发一次“测试”。' : binding.error === 'rebind_required' ? '授权已失效，请重新扫码。' : '网络正在重试，请稍候。';
-    }
+    title = binding.error === 'rebind_required' ? '微信连接需要重新绑定' : '微信已连接';
+    detail = binding.last_inbound ? '已收到来自微信的消息。' : '已完成微信授权。要开始收发，请先在微信 ClawBot 对话里发一条消息。';
+    if (binding.error === 'rebind_required') detail = '授权已失效，请重新扫码。';
+    if (binding.error === 'interaction_required') detail = '请在微信 ClawBot 里主动发一条消息，以更新会话。';
+    if (binding.error === 'send_failed') detail = '最近一条消息的发送结果未确认。';
+    if (binding.error === 'network_retry') detail = '微信通道正在重试连接，请稍候。';
   }
   $('status').textContent = title; $('detail').textContent = detail;
-  $('dot').classList.toggle('connected', binding?.state === 'verified' && !binding.error);
+  $('dot').classList.toggle('connected', binding?.state === 'connected' && binding.error !== 'rebind_required');
   show('bind', !starting && !qrActive && (!binding || binding.error === 'rebind_required'));
   show('qr-box', qrActive); show('provider-code', login?.state === 'need_verifycode');
-  show('receipt-box', binding && binding.state !== 'verified' && binding.last_inbound);
+  show('test-mode', data.mode === 'test');
   show('unbind', Boolean(binding || starting || qrActive));
   $('unbind').textContent = binding ? '解除本服务连接' : '取消本次绑定';
   if (qrActive && !qrShown) { $('qr').src = 'api/qr.png?t=' + Date.now(); qrShown = true; }
@@ -50,7 +50,6 @@ async function action(button, callback) {
 }
 $('bind').onclick = () => action('bind', async () => { qrShown = false; render(await api('bind', {})); });
 $('submit-provider').onclick = () => action('submit-provider', () => api('verify-code', { code: $('provider-input').value.trim() }));
-$('confirm').onclick = () => action('confirm', () => api('confirm-receipt', { code: $('receipt').value.trim() }));
 $('unbind').onclick = () => { if (window.confirm($('unbind').textContent + '？')) action('unbind', () => api('unbind', {})); };
 (async () => {
   const invite = new URLSearchParams(location.hash.slice(1)).get('invite');
