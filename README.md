@@ -37,6 +37,8 @@ Tests use a fake provider. They verify authorization boundaries, account separat
 
 For deployment, see [deployment instructions](docs/DEPLOYMENT.md). Applications integrate using the [HTTP API](docs/API.md).
 
+For host alerts over WeChat, see the optional [Linux resource monitor](examples/resource-monitor/README.md).
+
 ## Important boundaries
 
 1. **One WeChat account currently has one active application/user binding.** Another application cannot silently take it over. Sharing one personal connection across multiple applications requires an explicit user grant and chat routing design; that feature is not implemented yet. Multiple applications with separate bound accounts are supported by the API and storage model.

@@ -14,3 +14,4 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s examples/resource-monitor -v
