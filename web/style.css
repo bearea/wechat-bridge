@@ -1,1 +1,82 @@
-:root{color-scheme:light;--ink:#15332d;--muted:#64776f;--green:#18785b;--line:#dce5df}*{box-sizing:border-box}body{margin:0;background:#f4f7f3;color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;line-height:1.65}main{max-width:600px;margin:64px auto;padding:0 24px}.brand{display:flex;gap:10px;align-items:center;font-size:15px;font-weight:650}.mark{display:grid;place-items:center;background:var(--green);color:white;width:32px;height:32px;border-radius:10px}h1{font-size:clamp(27px,5vw,34px);line-height:1.35;margin:32px 0 12px;letter-spacing:-.03em}.intro{color:var(--muted);margin-bottom:28px}.card{background:white;border:1px solid var(--line);border-radius:20px;padding:28px;box-shadow:0 10px 40px #213c2e06}.status{display:flex;gap:10px;align-items:center}#dot{width:9px;height:9px;background:#b3beb7;border-radius:50%}#dot.connected{background:#229c6d}p{font-size:14px}#detail{color:var(--muted);margin:14px 0 22px}button{border:0;border-radius:10px;background:var(--green);color:#fff;padding:13px 18px;font-size:14px;font-weight:600;cursor:pointer}button:hover{background:#11664b}button:disabled{opacity:.5;cursor:wait}.secondary{background:#eef3ef;color:var(--muted);font-weight:500;margin-top:16px}.secondary:hover{background:#e4ece6}#qr-box{text-align:center;margin-top:22px}#qr{max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px}#qr-box p{font-size:13px;color:var(--muted)}label{display:block;font-size:14px;margin:18px 0 10px}input{width:100%;min-width:0;border:1px solid #c5d4cb;padding:12px;border-radius:10px;font-size:16px;background:white;color:var(--ink)}input:focus{outline:2px solid #8cbaa8;outline-offset:2px}#provider-input{margin-bottom:12px}#error{color:#ac3d34;margin:12px 0 0;white-space:pre-line}aside{padding:24px 4px;color:var(--muted);font-size:13px}aside p{font-size:13px;margin:7px 0}aside strong{font-weight:600;color:#51695b}footer{color:#85968c;font-size:12px;padding-top:12px;border-top:1px solid var(--line)}[hidden]{display:none!important}@media(max-width:500px){main{margin:32px auto;padding:0 18px}.card{padding:22px}h1{margin-top:28px}}
+:root {
+  color-scheme: light;
+  --ink: #171717;
+  --muted: #595959;
+  --line: #dedede;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: #fff;
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  line-height: 1.65;
+}
+
+main { max-width: 600px; margin: 64px auto; padding: 0 24px; }
+.brand { display: flex; gap: 10px; align-items: center; font-size: 15px; font-weight: 650; }
+.mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: var(--ink);
+  color: #fff;
+}
+h1 { font-size: clamp(27px, 5vw, 34px); line-height: 1.35; margin: 32px 0 12px; letter-spacing: -.03em; }
+p { font-size: 14px; }
+.intro { color: var(--muted); margin-bottom: 28px; }
+
+.card { border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
+.status { display: flex; gap: 10px; align-items: center; }
+#dot { width: 9px; height: 9px; background: #9b9b9b; border-radius: 50%; }
+#dot.connected { background: var(--ink); }
+#detail { color: var(--muted); margin: 14px 0 22px; }
+
+button {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: #171717;
+  color: #fff;
+  padding: 12px 17px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover { background: #333; }
+button:disabled { opacity: .5; cursor: wait; }
+.secondary { border-color: #bdbdbd; background: #fff; color: var(--ink); font-weight: 500; margin-top: 16px; }
+.secondary:hover { background: #f2f2f2; }
+
+#qr-box { text-align: center; margin-top: 22px; }
+#qr { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; }
+#qr-box p { font-size: 13px; color: var(--muted); }
+label { display: block; font-size: 14px; margin: 18px 0 10px; }
+input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #bdbdbd;
+  padding: 12px;
+  border-radius: 6px;
+  font-size: 16px;
+  background: #fff;
+  color: var(--ink);
+}
+button:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+#provider-input { margin-bottom: 12px; }
+#error { color: var(--ink); margin: 12px 0 0; white-space: pre-line; }
+#error:empty { display: none; }
+
+aside { padding: 24px 4px; color: var(--muted); font-size: 13px; }
+aside p { font-size: 13px; margin: 7px 0; }
+aside strong { font-weight: 600; color: var(--ink); }
+footer { color: var(--muted); font-size: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+[hidden] { display: none !important; }
+
+@media (max-width: 500px) {
+  main { margin: 32px auto; padding: 0 18px; }
+  .card { padding: 22px; }
+  h1 { margin-top: 28px; }
+}
