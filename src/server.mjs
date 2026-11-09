@@ -28,6 +28,7 @@ async function body(req) {
   return input;
 }
 const userId = value => typeof value === 'string' && /^[\w.@+-]{1,128}$/.test(value);
+const setupId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 const requestId = value => typeof value === 'string' && /^[\w:.-]{1,160}$/.test(value);
 const validText = text => typeof text === 'string' && text.trim().length > 0 && Buffer.byteLength(text) <= 3500;
 
@@ -116,6 +117,13 @@ export class Bridge {
       check(session, 'invitation_expired_or_used', 401);
       return this.json(res, 200, { ok: true }, { 'Set-Cookie': `${COOKIE}=${session}; Path=${this.prefix}; Secure; HttpOnly; SameSite=Strict; Max-Age=86400` });
     }
+    if (route === 'api/inline-claim' && method === 'POST') {
+      this.limit(`inline-claim:${req.headers['x-real-ip'] || req.socket.remoteAddress}`, 20);
+      const input = await body(req);
+      check(setupId(input.setup_id));
+      check(this.store.claimSetup(input.setup_id, this.browserSession(req)), 'setup_expired', 409);
+      return this.json(res, 200, { ok: true });
+    }
     const owner = this.browserOwner(req);
     if (route === 'api/status' && method === 'GET') {
       const candidate = this.config.mode === 'relay' && this.store.shareCandidate(this.browserSession(req), owner);
@@ -143,15 +151,14 @@ export class Bridge {
     }
     if (route === 'api/qr.png' && method === 'GET') {
       const login = this.logins.get(owner);
-      check(login?.image && login.expires > now() && ['wait', 'scaned', 'need_verifycode'].includes(login.state), 'qr_expired', 410);
+      check(login?.image && !login.setupId && login.expires > now() && ['wait', 'scaned', 'need_verifycode'].includes(login.state), 'qr_expired', 410);
       res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' }); return res.end(login.image);
     }
     if (route === 'api/verify-code' && method === 'POST') {
       const input = await body(req); this.browserOwner(req); const login = this.logins.get(owner);
-      check(login?.state === 'need_verifycode' && login.expires > now(), 'no_verification_pending', 409);
-      check(typeof input.code === 'string' && /^[a-zA-Z0-9]{4,16}$/.test(input.code));
-      this.limit(`provider-code:${owner}`, 5, 300000);
-      login.code = input.code; login.state = 'scaned'; return this.json(res, 200, { ok: true });
+      check(!login?.setupId, 'no_verification_pending', 409);
+      this.submitProviderCode(owner, login, input.code);
+      return this.json(res, 200, { ok: true });
     }
     if (route === 'api/unbind' && method === 'POST') {
       await body(req); this.browserOwner(req); this.unlink(owner, this.browserSession(req)); return this.json(res, 200, { ok: true });
@@ -168,6 +175,10 @@ export class Bridge {
       check(input.reuse_existing === undefined || typeof input.reuse_existing === 'boolean');
       const invite = this.store.invitation(owner, this.config.mode === 'relay' && input.reuse_existing === true);
       return this.json(res, 201, { url: `${this.config.publicUrl}#invite=${invite}`, expires_in: 1800 });
+    }
+    if (parts[0] === 'users' && parts[2] === 'binding-setup') {
+      const id = decodeURIComponent(parts[1]); check(userId(id));
+      return this.inlineSetup(req, res, application, id, parts.slice(3));
     }
     if (parts.length === 3 && parts[0] === 'users' && parts[2] === 'status' && req.method === 'GET') {
       const id = decodeURIComponent(parts[1]); check(userId(id));
@@ -206,6 +217,73 @@ export class Bridge {
     }
     throw new HttpError(404, 'not_found');
   }
+  submitProviderCode(owner, login, code) {
+    check(login?.state === 'need_verifycode' && login.expires > now(), 'no_verification_pending', 409);
+    check(typeof code === 'string' && /^[a-zA-Z0-9]{4,16}$/.test(code));
+    this.limit(`provider-code:${owner}`, 5, 300000);
+    login.code = code;
+    login.state = 'scaned';
+  }
+  stopLogin(owner) {
+    this.logins.get(owner)?.controller.abort();
+    this.logins.delete(owner);
+  }
+  inlineStatus(owner, setup) {
+    const status = this.publicStatus(owner);
+    const login = this.logins.get(owner);
+    const active = login?.setupId === setup.id ? login : null;
+    const share = this.store.shareSource(setup.source_session, owner, setup.source_generation);
+    return { ...status, login: active ? status.login : null, share_application: share?.application_name || null,
+      qr_png: active?.image && active.expires > now() ? active.image.toString('base64') : null };
+  }
+  async inlineSetup(req, res, application, id, parts) {
+    check(this.config.mode === 'relay', 'setup_unavailable', 409);
+    if (req.method === 'POST' && parts.length === 0) {
+      await body(req);
+      const owner = this.ownerFor(application, id);
+      const connection = this.store.connection(owner);
+      if (connection && (connection.shared || connection.transport_error !== 'rebind_required')) {
+        return this.json(res, 200, { setup_id: null, ...this.publicStatus(owner) });
+      }
+      this.limit(`inline:${owner}`, 10, 300000);
+      if (this.logins.get(owner)?.setupId) this.stopLogin(owner);
+      const setup = this.store.createSetup(owner);
+      return this.json(res, 201, { setup_id: setup });
+    }
+    check((parts.length === 1 && req.method === 'GET') || (parts.length === 2 && req.method === 'POST'), 'not_found', 404);
+    const [setup, action] = parts;
+    check(setupId(setup));
+    const input = req.method === 'POST' ? await body(req) : null;
+    const owner = this.store.findOwner(application.id, id)?.id;
+    const current = owner && this.store.setup(setup, owner);
+    check(current?.claimed, 'setup_expired', 409);
+    if (req.method === 'GET') return this.json(res, 200, this.inlineStatus(owner, current));
+    const login = this.logins.get(owner);
+    if (action === 'cancel') {
+      if (login?.setupId === setup) this.stopLogin(owner);
+      this.store.clearSetup(setup, owner);
+      return this.json(res, 200, { ok: true });
+    }
+    if (action === 'share') {
+      const candidate = this.store.shareSource(current.source_session, owner, current.source_generation);
+      check(this.store.addShare(owner, candidate), 'share_unavailable', 409);
+      this.stopLogin(owner);
+    } else if (action === 'start') {
+      const connection = this.store.connection(owner);
+      check(!connection || (!connection.shared && connection.transport_error === 'rebind_required'), 'binding_changed', 409);
+      if (this.store.shareSource(current.source_session, owner, current.source_generation)) {
+        return this.json(res, 200, this.inlineStatus(owner, current));
+      }
+      if (login?.setupId !== setup || login.finished || login.expires <= now()) {
+        this.limit(`bind:${owner}`, 5, 300000);
+        await this.startLogin(owner, setup);
+      }
+    } else if (action === 'verify-code') {
+      check(login?.setupId === setup, 'no_verification_pending', 409);
+      this.submitProviderCode(owner, login, input.code);
+    } else throw new HttpError(404, 'not_found');
+    return this.json(res, 200, this.inlineStatus(owner, current));
+  }
   unlink(owner, session) {
     const share = this.store.shareBySource(owner);
     if (share) this.stopOwner(share.owner);
@@ -214,17 +292,17 @@ export class Bridge {
   }
   stopOwner(owner) {
     this.sendControllers.get(owner)?.abort();
-    this.logins.get(owner)?.controller.abort(); this.logins.delete(owner);
+    this.stopLogin(owner);
     this.workers.get(owner)?.controller.abort(); this.workers.delete(owner);
   }
-  async startLogin(owner) {
+  async startLogin(owner, setup = null) {
     check(!this.closing, 'service_unavailable', 503);
     const previous = this.logins.get(owner);
     check(previous?.state !== 'starting', 'binding_in_progress', 409);
     const active = [...this.logins.values()].filter(login => !login.finished).length;
     check(active - (previous && !previous.finished ? 1 : 0) < 20, 'too_many_pending_bindings', 429);
     previous?.controller.abort();
-    const login = { state: 'starting', expires: now() + 300000, controller: new AbortController() };
+    const login = { setupId: setup, state: 'starting', expires: now() + 300000, controller: new AbortController() };
     this.logins.set(owner, login);
     const ready = this.prepareLogin(owner, login);
     login.task = ready.then(() => this.pollLogin(owner, login)).catch(() => {
@@ -256,7 +334,7 @@ export class Bridge {
       try {
         const result = await this.provider.qrStatus(login.base, login.qr, login.code, signal); login.code = undefined;
         if (signal.aborted || this.logins.get(owner) !== login) return;
-        if (now() >= login.expires) break;
+        if (now() >= login.expires || (login.setupId && !this.store.setup(login.setupId, owner))) break;
         if (result.status === 'scaned_but_redirect') {
           login.base = safeBase(`https://${result.redirect_host}`); login.state = 'scaned';
         } else if (result.status === 'confirmed') {

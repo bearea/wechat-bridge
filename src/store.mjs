@@ -22,6 +22,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS share_invitations(token_hash TEXT PRIMARY KEY REFERENCES invitations(token_hash) ON DELETE CASCADE);
       CREATE TABLE IF NOT EXISTS share_candidates(session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE, source_session TEXT NOT NULL, source_generation TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS shares(owner TEXT PRIMARY KEY REFERENCES owners(id), source_owner TEXT UNIQUE NOT NULL REFERENCES bindings(owner) ON DELETE CASCADE, source_generation TEXT NOT NULL, generation TEXT NOT NULL, connected INTEGER NOT NULL, last_inbound INTEGER, last_outbound INTEGER, error TEXT);
+      CREATE TABLE IF NOT EXISTS binding_setups(
+        id TEXT PRIMARY KEY, owner TEXT UNIQUE NOT NULL REFERENCES owners(id), expires INTEGER NOT NULL,
+        claimed INTEGER NOT NULL DEFAULT 0, source_session TEXT, source_generation TEXT
+      );
       CREATE TABLE IF NOT EXISTS delegated_message_keys(message_key TEXT PRIMARY KEY, created INTEGER NOT NULL);`);
     if (!this.db.prepare('PRAGMA table_info(bindings)').all().some(column => column.name === 'relay_after')) {
       this.db.exec('ALTER TABLE bindings ADD COLUMN relay_after INTEGER NOT NULL DEFAULT 0');
@@ -104,24 +108,53 @@ export class Store {
   session(token) {
     return this.db.prepare('SELECT owner FROM sessions WHERE token_hash=? AND expires>?').get(hash(token), now())?.owner;
   }
-  shareCandidate(token, owner) {
+  shareSource(sourceSession, owner, generation = null) {
+    if (!sourceSession) return null;
     return this.db.prepare(`SELECT b.owner,b.generation,a.name AS application_name
-      FROM share_candidates c JOIN sessions target ON target.token_hash=c.session_hash
-      JOIN sessions source ON source.token_hash=c.source_session
-      JOIN bindings b ON b.owner=source.owner AND b.generation=c.source_generation
-      JOIN owners o ON o.id=target.owner JOIN applications a ON a.id=o.application
-      WHERE target.token_hash=? AND target.owner=? AND target.expires>? AND source.expires>?
-        AND NOT EXISTS(SELECT 1 FROM shares WHERE source_owner=b.owner OR owner=target.owner)
-        AND NOT EXISTS(SELECT 1 FROM bindings WHERE owner=target.owner)
-        AND b.error IS NOT 'rebind_required'`).get(hash(token), owner, now(), now());
+      FROM sessions source JOIN bindings b ON b.owner=source.owner
+      JOIN owners o ON o.id=? JOIN applications a ON a.id=o.application
+      WHERE source.token_hash=? AND source.expires>? AND b.owner<>o.id
+        AND b.generation=COALESCE(?,b.generation)
+        AND NOT EXISTS(SELECT 1 FROM shares WHERE source_owner=b.owner OR owner=o.id)
+        AND NOT EXISTS(SELECT 1 FROM bindings WHERE owner=o.id)
+        AND b.error IS NOT 'rebind_required'`).get(owner, sourceSession, now(), generation);
   }
-  grant(token, owner) {
-    const candidate = this.shareCandidate(token, owner);
+  shareCandidate(token, owner) {
+    const candidate = this.db.prepare(`SELECT c.source_session,c.source_generation
+      FROM share_candidates c JOIN sessions target ON target.token_hash=c.session_hash
+      WHERE target.token_hash=? AND target.owner=? AND target.expires>?`).get(hash(token), owner, now());
+    return candidate ? this.shareSource(candidate.source_session, owner, candidate.source_generation) : null;
+  }
+  addShare(owner, candidate) {
     if (!candidate) return false;
     this.db.prepare('INSERT INTO shares(owner,source_owner,source_generation,generation,connected) VALUES(?,?,?,?,?)')
       .run(owner, candidate.owner, candidate.generation, randomUUID(), now());
+    return true;
+  }
+  grant(token, owner) {
+    if (!this.addShare(owner, this.shareCandidate(token, owner))) return false;
     this.db.prepare('DELETE FROM share_candidates WHERE session_hash=?').run(hash(token));
     return true;
+  }
+  createSetup(owner) {
+    const id = secret();
+    this.db.prepare(`INSERT INTO binding_setups(id,owner,expires) VALUES(?,?,?)
+      ON CONFLICT(owner) DO UPDATE SET id=excluded.id,expires=excluded.expires,claimed=0,
+      source_session=NULL,source_generation=NULL`).run(id, owner, now() + 360000);
+    return id;
+  }
+  setup(id, owner) {
+    return this.db.prepare('SELECT * FROM binding_setups WHERE id=? AND owner=? AND expires>?').get(id, owner, now());
+  }
+  claimSetup(id, session) {
+    const setup = this.db.prepare('SELECT owner FROM binding_setups WHERE id=? AND expires>? AND claimed=0').get(id, now());
+    if (!setup) return false;
+    const source = session && this.shareSource(hash(session), setup.owner);
+    return !!this.db.prepare(`UPDATE binding_setups SET claimed=1,source_session=?,source_generation=?
+      WHERE id=? AND claimed=0 AND expires>?`).run(source ? hash(session) : null, source?.generation || null, id, now()).changes;
+  }
+  clearSetup(id, owner) {
+    this.db.prepare('DELETE FROM binding_setups WHERE id=? AND owner=?').run(id, owner);
   }
   shareBySource(owner) {
     return this.db.prepare('SELECT owner FROM shares WHERE source_owner=?').get(owner);
@@ -182,6 +215,7 @@ export class Store {
       this.db.prepare('DELETE FROM shares WHERE owner=?').run(owner);
       this.db.prepare('DELETE FROM bindings WHERE owner=?').run(owner);
       this.db.prepare('DELETE FROM invitations WHERE owner=?').run(owner);
+      this.db.prepare('DELETE FROM binding_setups WHERE owner=?').run(owner);
       this.db.prepare('DELETE FROM sessions WHERE owner=? AND token_hash<>?').run(owner, hash(session || ''));
       this.db.prepare("UPDATE outbound SET payload_hash='',client_id='',state='unbound' WHERE owner=?").run(owner);
       this.db.prepare('DELETE FROM events WHERE owner=?').run(owner);
@@ -237,6 +271,7 @@ export class Store {
       });
   }
   cleanup() {
+    this.db.prepare('DELETE FROM binding_setups WHERE expires<?').run(now());
     this.db.prepare('DELETE FROM invitations WHERE expires<?').run(now());
     this.db.prepare('DELETE FROM sessions WHERE expires<?').run(now());
     this.db.prepare('DELETE FROM events WHERE created<?').run(now() - 7 * 86400000);

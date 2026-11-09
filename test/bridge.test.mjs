@@ -447,3 +447,63 @@ test('the primary owner can revoke an inbox without unlinking its transport', as
   assert.equal(f.bridge.store.binding(f.a).generation, generation);
   assert.equal((await f.bridge.send(f.a, 'resource alert', 'alert-after-revoke')).accepted_by_wechat, true);
 });
+
+
+test('inline setup scopes the QR and official pairing challenge to its application user', { timeout: 5000 }, async t => {
+  const f = await fixture(t, 'relay');
+  f.provider.qrStatus = async (base, qr, code) => code === 'AB12' ?
+    { status: 'confirmed', bot_token: 'fake-token', ilink_bot_id: 'bot-a', ilink_user_id: 'wechat-a' } :
+    { status: 'need_verifycode' };
+  const base = '/connect/v1/users/same-user-id/binding-setup';
+  const created = await f.call(base, { token: f.tokenA, data: {} });
+  assert.equal(created.status, 201);
+  const setup = base + '/' + created.result.setup_id;
+  assert.equal((await f.call(setup + '/start', { token: f.tokenA, data: {} })).status, 409);
+  assert.equal((await f.call('/connect/api/inline-claim', {
+    origin: 'https://foreign.example.test', data: { setup_id: created.result.setup_id },
+  })).status, 403);
+  const claim = await f.call('/connect/api/inline-claim', { data: { setup_id: created.result.setup_id } });
+  assert.equal(claim.status, 200);
+  assert.equal(claim.headers.get('set-cookie'), null);
+  assert.equal((await f.call('/connect/api/inline-claim', { data: { setup_id: created.result.setup_id } })).status, 409);
+  assert.equal((await f.call(setup, { token: f.tokenB })).status, 409);
+  assert.equal((await f.call(setup.replace('same-user-id', 'foreign-user'), { token: f.tokenA })).status, 409);
+  const started = await f.call(setup + '/start', { token: f.tokenA, data: {} });
+  assert.equal(started.result.login.state, 'need_verifycode');
+  assert.equal(Buffer.from(started.result.qr_png, 'base64').subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  assert.equal((await f.call(setup + '/verify-code', { token: f.tokenB, data: { code: 'AB12' } })).status, 409);
+  assert.equal((await f.call(setup + '/verify-code', { token: f.tokenA, data: { code: 'AB12' } })).status, 200);
+  await f.bridge.logins.get(f.a).task;
+  const connected = await f.call(setup, { token: f.tokenA });
+  assert.equal(connected.result.binding.state, 'connected');
+  assert.equal(connected.result.qr_png, null);
+  assert.equal((await f.call(setup + '/cancel', { token: f.tokenA, data: {} })).status, 200);
+  assert.ok(f.bridge.store.binding(f.a));
+  const reopened = await f.call(base, { token: f.tokenA, data: {} });
+  assert.equal(reopened.result.setup_id, null);
+});
+
+
+test('inline sharing uses the original browser cookie without replacing it or starting a QR', async t => {
+  const f = await fixture(t, 'relay');
+  const generation = f.bind(f.a, 'a');
+  f.receive(f.a, 'a', generation);
+  const cookie = f.cookieFor(f.a);
+  f.provider.qr = () => assert.fail('a shared connection must not generate a QR');
+  const base = '/connect/v1/users/same-user-id/binding-setup';
+  const created = await f.call(base, { token: f.tokenB, data: {} });
+  const setup = base + '/' + created.result.setup_id;
+  const claim = await f.call('/connect/api/inline-claim', { cookie, data: { setup_id: created.result.setup_id } });
+  assert.equal(claim.status, 200);
+  assert.equal(claim.headers.get('set-cookie'), null);
+  const offer = await f.call(setup + '/start', { token: f.tokenB, data: {} });
+  assert.equal(offer.result.share_application, 'B');
+  assert.equal(offer.result.qr_png, null);
+  assert.equal(f.bridge.store.connection(f.b), null);
+  assert.equal((await f.call(setup + '/share', { token: f.tokenB, data: {} })).result.binding.shared, true);
+  assert.equal((await f.call('/connect/api/status', { cookie })).result.has_share, true);
+  assert.equal((await f.bridge.send(f.a, 'monitor unchanged', 'test-alert')).accepted_by_wechat, true);
+  assert.equal((await f.call('/connect/v1/users/same-user-id/unbind', { token: f.tokenB, data: {} })).status, 200);
+  assert.equal((await f.call(setup, { token: f.tokenB })).status, 409);
+  assert.equal(f.bridge.store.binding(f.a).generation, generation);
+});

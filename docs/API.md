@@ -84,3 +84,11 @@ Common errors include `application_auth_required` (401), `event_not_found` (404)
 ## Administration
 
 The application-creation endpoint is deliberately outside the public proxy prefix and requires both a loopback connection and the admin token. Use `src/admin.mjs`; do not expose `/admin/` through a reverse proxy. The supplied CLI stores new application credentials in a private directory beside the server configuration and prints only the storage path.
+
+## Inline binding for an application on the same origin
+
+An authenticated application backend can start setup with `POST v1/users/{user_id}/binding-setup` and an empty JSON object. An already connected user receives status immediately. Otherwise the response contains a short-lived `setup_id`.
+
+The application's browser makes a same-origin `POST api/inline-claim` with the setup ID. This request can associate the bridge's existing HttpOnly session with the setup for a possible share. It consumes the claim once and does not change that session. The browser receives neither the application bearer token nor a bridge management session.
+
+After the claim, the application backend uses the same application and user credentials to call `POST v1/users/{user_id}/binding-setup/{setup_id}/start`. The response offers either explicit sharing of the existing connection or an official QR PNG encoded in `qr_png`. The backend can poll the setup with `GET` on that setup path and use `POST` actions `share`, `verify-code` or `cancel`. The `verify-code` action accepts the pairing code requested by WeChat. Share approval remains an explicit user action. Cancel closes the pending setup without disconnecting an existing binding.
