@@ -1,0 +1,14 @@
+node_modules
+data/
+state/
+.env
+.env.*
+!.env.example
+config.json
+*.sqlite*
+*.db*
+*.pem
+*.key
+*.log
+coverage/
+*.tgz

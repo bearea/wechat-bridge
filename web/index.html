@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>绑定微信 · WeChat Bridge</title><link rel="stylesheet" href="style.css"><script defer src="app.js"></script></head>
+<body><main>
+  <div class="brand"><span class="mark">W</span> WeChat Bridge</div>
+  <h1>把微信连接到你的服务</h1>
+  <p class="intro">扫码授权，验证收发。连接由你自己的服务器管理。</p>
+  <section class="card" aria-live="polite">
+    <div class="status"><span id="dot"></span><strong id="status">正在检查连接…</strong></div>
+    <p id="detail"></p>
+    <button id="bind" hidden>生成微信绑定二维码</button>
+    <div id="qr-box" hidden><img id="qr" width="280" height="280" alt="微信官方授权二维码"><p>打开手机微信扫一扫，并在手机上确认授权。<br>二维码约五分钟内有效。</p></div>
+    <div id="provider-code" hidden><label for="provider-input">微信要求进一步验证，请输入微信页面提示的配对码</label><input id="provider-input" maxlength="16" autocomplete="off"><button id="submit-provider">提交配对码</button></div>
+    <div id="receipt-box" hidden><label for="receipt">微信收到的 6 位回执码</label><div class="row"><input id="receipt" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="输入回执码"><button id="confirm">验证</button></div></div>
+    <p id="error" role="alert"></p>
+    <button id="unbind" class="secondary" hidden>解除本服务连接</button>
+  </section>
+  <aside><strong>当前为通道测试</strong><p>绑定后，请在微信 ClawBot 对话里发送“测试”。服务会回复连接回执，暂不生成聊天回答。</p><p>解除连接会删除本服务保存的微信凭证；你也可以在微信中管理或撤销对应授权。</p></aside>
+  <footer>WeChat Bridge · 独立部署的微信接入服务</footer>
+</main></body></html>

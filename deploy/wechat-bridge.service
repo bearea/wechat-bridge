@@ -1,0 +1,42 @@
+[Unit]
+Description=WeChat Bridge - application-scoped ClawBot transport
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=wechat-assistant
+Group=wechat-assistant
+WorkingDirectory=/opt/wechat-assistant/app
+Environment=WECHAT_BRIDGE_CONFIG=/etc/wechat-bridge/config.json
+Environment=NODE_OPTIONS=--max-old-space-size=96
+ExecStart=/opt/wechat-assistant/runtime/bin/node /opt/wechat-assistant/app/src/server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+StateDirectory=wechat-assistant
+StateDirectoryMode=0700
+UMask=0077
+MemoryAccounting=yes
+MemoryHigh=128M
+MemoryMax=192M
+MemorySwapMax=64M
+CPUQuota=25%
+TasksMax=64
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
