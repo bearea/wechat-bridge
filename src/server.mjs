@@ -329,7 +329,7 @@ export class Bridge {
     this.queues.set(owner, operation);
     try { return await operation; } finally { if (this.queues.get(owner) === operation) this.queues.delete(owner); }
   }
-  async listen(port = this.config.port || 8318) {
+  async listen(port = this.config.port ?? 8318) {
     await new Promise((done, reject) => { this.server.once('error', reject); this.server.listen(port, '127.0.0.1', done); });
     for (const row of this.store.db.prepare('SELECT owner FROM bindings').all()) this.startWorker(row.owner);
     this.cleanupTimer = setInterval(() => {
@@ -352,15 +352,16 @@ export class Bridge {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (import.meta.main) {
   process.umask(0o077);
   try {
     const config = JSON.parse(readFileSync(process.env.WECHAT_BRIDGE_CONFIG || '/etc/wechat-bridge/config.json', 'utf8'));
     check(['test', 'relay'].includes(config.mode));
     check(new URL(config.publicUrl).protocol === 'https:');
     mkdirSync(dirname(config.database), { recursive: true, mode: 0o700 });
-    const bridge = new Bridge(config); await bridge.listen();
-    console.log(JSON.stringify({ event: 'bridge_started', mode: config.mode, host: '127.0.0.1', port: config.port }));
+    const bridge = new Bridge(config);
+    const port = await bridge.listen();
+    console.log(JSON.stringify({ event: 'bridge_started', mode: config.mode, host: '127.0.0.1', port }));
     let closing = false;
     for (const event of ['SIGTERM', 'SIGINT']) process.on(event, () => { if (!closing) { closing = true; bridge.close().then(() => process.exit(0)); } });
   } catch (error) { console.error(JSON.stringify({ event: 'startup_failed', code: error.code || error.name })); process.exit(1); }
