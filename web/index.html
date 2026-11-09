@@ -8,6 +8,11 @@
   <section class="card" aria-live="polite">
     <div class="status"><span id="dot"></span><strong id="status">正在检查连接…</strong></div>
     <p id="detail"></p>
+    <div id="share-box" hidden>
+      <p id="share-detail"></p>
+      <button id="share">授权使用已有连接</button>
+    </div>
+    <button id="revoke-share" class="secondary" hidden>撤销聊天共享</button>
     <button id="bind" hidden>生成微信绑定二维码</button>
     <div id="qr-box" hidden><img id="qr" width="280" height="280" alt="微信官方授权二维码"><p>打开手机微信扫一扫，并在手机上确认授权。<br>二维码约五分钟内有效。</p></div>
     <div id="provider-code" hidden><label for="provider-input">微信要求进一步验证，请输入微信页面提示的配对码</label><input id="provider-input" maxlength="16" autocomplete="off"><button id="submit-provider">提交配对码</button></div>

@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const errors = { session_required: '请使用服务提供的专属绑定链接打开此页。', invitation_expired_or_used: '绑定链接已使用或已过期，请重新获取。', rate_limited: '操作较频繁，请稍后重试。', service_unavailable: '服务暂不可用，请稍后重试。', invalid_request: '请检查输入内容。', no_verification_pending: '当前无需提交配对码。' };
+const errors = { session_required: '请使用服务提供的专属绑定链接打开此页。', invitation_expired_or_used: '绑定链接已使用或已过期，请重新获取。', rate_limited: '操作较频繁，请稍后重试。', service_unavailable: '服务暂不可用，请稍后重试。', invalid_request: '请检查输入内容。', no_verification_pending: '当前无需提交配对码。', share_unavailable: '这条共享授权已不可用，请重新打开绑定链接。' };
 const api = async (path, data) => {
   const response = await fetch('api/' + path, { method: data === undefined ? 'GET' : 'POST',
     credentials: 'same-origin', headers: data === undefined ? {} : { 'Content-Type': 'application/json' },
@@ -19,7 +19,7 @@ function render(data) {
   if (qrActive) { title = login.state === 'wait' ? '等待微信扫码' : '等待确认授权'; detail = '请使用你要绑定的微信扫码，并按手机页面提示确认。'; }
   if (login?.state === 'expired') { title = '二维码已过期'; detail = '请重新生成二维码。'; }
   if (['provider_error','verify_code_blocked','already_bound_elsewhere','rebind_required'].includes(login?.state)) {
-    title = '本次绑定未完成'; detail = login.state === 'already_bound_elsewhere' ? '这个微信已关联其他应用账号。请先解除原连接，或使用另一个微信。' : '微信未完成授权。请重新生成二维码并按手机提示操作。';
+    title = '本次绑定未完成'; detail = login.state === 'already_bound_elsewhere' ? '这个微信已有连接。请在此浏览器打开原连接的绑定页，再重新获取本应用的绑定链接以授权共享。' : '微信未完成授权。请重新生成二维码并按手机提示操作。';
   }
   if (binding && !starting && !qrActive) {
     title = binding.error === 'rebind_required' ? '微信连接需要重新绑定' : '微信已连接';
@@ -31,8 +31,12 @@ function render(data) {
   }
   $('status').textContent = title; $('detail').textContent = detail;
   $('dot').classList.toggle('connected', binding?.state === 'connected' && binding.error !== 'rebind_required');
-  show('bind', !starting && !qrActive && (!binding || binding.error === 'rebind_required'));
+  const sharing = !!data.share_application && !binding;
+  show('bind', !sharing && !starting && !qrActive && (!binding || (!binding.shared && binding.error === 'rebind_required')));
   show('qr-box', qrActive); show('provider-code', login?.state === 'need_verifycode');
+  show('share-box', sharing);
+  $('share-detail').textContent = sharing ? '授权「' + data.share_application + '」接收之后发送给 ClawBot 的新消息、回复和发送通知。原连接仍可发送自己的通知。' : '';
+  show('revoke-share', !!data.has_share);
   show('test-mode', data.mode === 'test');
   show('unbind', Boolean(binding || starting || qrActive));
   $('unbind').textContent = binding ? '解除本服务连接' : '取消本次绑定';
@@ -50,6 +54,8 @@ async function action(button, callback) {
 }
 $('bind').onclick = () => action('bind', async () => { qrShown = false; render(await api('bind', {})); });
 $('submit-provider').onclick = () => action('submit-provider', () => api('verify-code', { code: $('provider-input').value.trim() }));
+$('share').onclick = () => action('share', () => api('share', {}));
+$('revoke-share').onclick = () => { if (window.confirm('撤销聊天共享？原连接仍可发送通知。')) action('revoke-share', () => api('revoke-share', {})); };
 $('unbind').onclick = () => { if (window.confirm($('unbind').textContent + '？')) action('unbind', () => api('unbind', {})); };
 (async () => {
   const invite = new URLSearchParams(location.hash.slice(1)).get('invite');

@@ -38,7 +38,7 @@ export class Bridge {
     this.prefix = new URL(config.publicUrl).pathname.replace(/\/?$/, '/');
     this.store = new Store(config.database, config.encryptionKey);
     this.provider = provider;
-    this.logins = new Map(); this.workers = new Map(); this.queues = new Map(); this.rates = new Map(); this.closing = false;
+    this.logins = new Map(); this.workers = new Map(); this.queues = new Map(); this.sendControllers = new Map(); this.rates = new Map(); this.closing = false;
     this.server = http.createServer((req, res) => this.handle(req, res).catch(error => {
       if (res.headersSent) return res.destroy();
       const status = error instanceof HttpError ? error.status : 502;
@@ -56,14 +56,18 @@ export class Bridge {
   }
   publicStatus(owner) {
     const login = this.logins.get(owner);
-    const binding = owner ? this.store.binding(owner) : null;
+    const binding = owner ? this.store.connection(owner) : null;
     return { mode: this.config.mode, login: login ? { state: login.state, expires_at: login.expires } : null,
-      binding: binding ? { state: 'connected',
-        connected_at: binding.connected, last_inbound: binding.last_inbound, last_outbound: binding.last_outbound, error: binding.error } : null };
+      binding: binding ? { state: 'connected', connection_id: binding.generation, shared: !!binding.shared,
+        connected_at: binding.connected, last_inbound: binding.last_inbound, last_outbound: binding.last_outbound,
+        error: binding.transport_error === 'rebind_required' ? 'rebind_required' : binding.error } : null };
+  }
+  browserSession(req) {
+    const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(s => s.trim().split('=')));
+    return cookies[COOKIE] || '';
   }
   browserOwner(req) {
-    const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(s => s.trim().split('=')));
-    const owner = this.store.session(cookies[COOKIE] || '');
+    const owner = this.store.session(this.browserSession(req));
     check(owner, 'session_required', 401); return owner;
   }
   application(req) {
@@ -108,14 +112,32 @@ export class Bridge {
       this.limit(`redeem:${req.headers['x-real-ip'] || req.socket.remoteAddress}`, 10);
       const input = await body(req);
       check(typeof input.invite === 'string' && input.invite.length <= 100);
-      const session = this.store.redeem(input.invite);
+      const session = this.store.redeem(input.invite, this.browserSession(req));
       check(session, 'invitation_expired_or_used', 401);
       return this.json(res, 200, { ok: true }, { 'Set-Cookie': `${COOKIE}=${session}; Path=${this.prefix}; Secure; HttpOnly; SameSite=Strict; Max-Age=86400` });
     }
     const owner = this.browserOwner(req);
-    if (route === 'api/status' && method === 'GET') return this.json(res, 200, this.publicStatus(owner));
+    if (route === 'api/status' && method === 'GET') {
+      const candidate = this.config.mode === 'relay' && this.store.shareCandidate(this.browserSession(req), owner);
+      return this.json(res, 200, { ...this.publicStatus(owner), share_application: candidate?.application_name || null,
+        has_share: !!this.store.shareBySource(owner) });
+    }
+    if (route === 'api/share' && method === 'POST') {
+      await body(req);
+      check(this.config.mode === 'relay' && this.store.grant(this.browserSession(req), owner), 'share_unavailable', 409);
+      this.stopOwner(owner);
+      return this.json(res, 200, this.publicStatus(owner));
+    }
+    if (route === 'api/revoke-share' && method === 'POST') {
+      await body(req); this.browserOwner(req);
+      const share = this.store.shareBySource(owner);
+      if (share) this.unlink(share.owner);
+      return this.json(res, 200, { ok: true });
+    }
     if (route === 'api/bind' && method === 'POST') {
-      await body(req); this.limit(`bind:${owner}`, 5, 300000);
+      await body(req); this.browserOwner(req);
+      check(!this.store.connection(owner)?.shared, 'unbind_shared_first', 409);
+      this.limit(`bind:${owner}`, 5, 300000);
       await this.startLogin(owner);
       return this.json(res, 200, this.publicStatus(owner));
     }
@@ -125,14 +147,14 @@ export class Bridge {
       res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' }); return res.end(login.image);
     }
     if (route === 'api/verify-code' && method === 'POST') {
-      const input = await body(req); const login = this.logins.get(owner);
+      const input = await body(req); this.browserOwner(req); const login = this.logins.get(owner);
       check(login?.state === 'need_verifycode' && login.expires > now(), 'no_verification_pending', 409);
       check(typeof input.code === 'string' && /^[a-zA-Z0-9]{4,16}$/.test(input.code));
       this.limit(`provider-code:${owner}`, 5, 300000);
       login.code = input.code; login.state = 'scaned'; return this.json(res, 200, { ok: true });
     }
     if (route === 'api/unbind' && method === 'POST') {
-      await body(req); this.stopOwner(owner); this.store.unbind(owner); return this.json(res, 200, { ok: true });
+      await body(req); this.browserOwner(req); this.unlink(owner, this.browserSession(req)); return this.json(res, 200, { ok: true });
     }
     throw new HttpError(404, 'not_found');
   }
@@ -143,7 +165,8 @@ export class Bridge {
     if (route === 'invitations' && req.method === 'POST') {
       const input = await body(req); const owner = this.ownerFor(application, input.user_id);
       this.limit(`invites:${owner}`, 10, 3600000);
-      const invite = this.store.invitation(owner);
+      check(input.reuse_existing === undefined || typeof input.reuse_existing === 'boolean');
+      const invite = this.store.invitation(owner, this.config.mode === 'relay' && input.reuse_existing === true);
       return this.json(res, 201, { url: `${this.config.publicUrl}#invite=${invite}`, expires_in: 1800 });
     }
     if (parts.length === 3 && parts[0] === 'users' && parts[2] === 'status' && req.method === 'GET') {
@@ -151,12 +174,20 @@ export class Bridge {
       const owner = this.store.findOwner(application.id, id)?.id;
       return this.json(res, 200, this.publicStatus(owner));
     }
+    if (parts.length === 3 && parts[0] === 'users' && parts[2] === 'unbind' && req.method === 'POST') {
+      await body(req);
+      const id = decodeURIComponent(parts[1]); check(userId(id));
+      const owner = this.store.findOwner(application.id, id)?.id;
+      if (owner) this.unlink(owner);
+      return this.json(res, 200, { ok: true });
+    }
     if (parts.length === 3 && parts[0] === 'users' && parts[2] === 'send' && req.method === 'POST') {
       const input = await body(req); const id = decodeURIComponent(parts[1]); check(userId(id));
       const owner = this.store.findOwner(application.id, id)?.id;
       check(owner, 'binding_not_connected', 409);
       this.limit(`send:${owner}`, 8);
-      const result = await this.send(owner, input.text, input.request_id);
+      check(input.connection_id === undefined || requestId(input.connection_id));
+      const result = await this.send(owner, input.text, input.request_id, undefined, false, input.connection_id);
       return this.json(res, 200, result);
     }
     if (route === 'events' && req.method === 'GET') {
@@ -167,15 +198,22 @@ export class Bridge {
       check(/^\d+$/.test(parts[1])); const input = await body(req);
       const event = this.store.db.prepare('SELECT e.* FROM events e JOIN owners o ON o.id=e.owner WHERE e.id=? AND o.application=?').get(Number(parts[1]), application.id);
       check(event, 'event_not_found', 404);
-      const binding = this.store.binding(event.owner);
+      const binding = this.store.connection(event.owner);
       check(binding?.generation === event.generation, 'binding_changed', 409);
-      check(event.id > binding.relay_after, 'event_not_found', 404);
+      check(binding.shared || event.id > binding.relay_after, 'event_not_found', 404);
       this.limit(`send:${event.owner}`, 8);
-      return this.json(res, 200, await this.send(event.owner, input.text, input.request_id, this.store.decrypt(event.payload).context));
+      return this.json(res, 200, await this.send(event.owner, input.text, input.request_id, this.store.decrypt(event.payload).context, false, event.generation));
     }
     throw new HttpError(404, 'not_found');
   }
+  unlink(owner, session) {
+    const share = this.store.shareBySource(owner);
+    if (share) this.stopOwner(share.owner);
+    this.stopOwner(owner);
+    this.store.unbind(owner, session);
+  }
   stopOwner(owner) {
+    this.sendControllers.get(owner)?.abort();
     this.logins.get(owner)?.controller.abort(); this.logins.delete(owner);
     this.workers.get(owner)?.controller.abort(); this.workers.delete(owner);
   }
@@ -262,7 +300,7 @@ export class Bridge {
         if (binding.error === 'network_retry') this.store.clearNetworkError(owner, worker.generation);
         if (this.config.mode === 'test') {
           for (const event of events) {
-            if (!event.context) continue;
+            if (!event.context || event.owner !== owner) continue;
             const current = this.store.binding(owner);
             if (current?.generation !== worker.generation) break;
             try { await this.send(owner, '微信通道已收到你的消息。', `test:${worker.generation}:${event.id}`, event.context, true); }
@@ -281,17 +319,18 @@ export class Bridge {
       await sleep(300, signal);
     }
   }
-  async send(owner, text, id, context, internal = false) {
+  async send(owner, text, id, context, internal = false, expectedConnection) {
     check(validText(text)); check(requestId(id), 'request_id_required');
     check(internal || !id.startsWith('test:'), 'request_id_reserved');
     check(!this.closing, 'service_unavailable', 503);
-    const initial = this.store.binding(owner);
+    const initial = this.store.connection(owner);
     check(initial, 'binding_not_connected', 409);
-    const generation = initial.generation;
-    const previous = this.queues.get(owner) || Promise.resolve();
+    check(!expectedConnection || initial.generation === expectedConnection, 'binding_changed', 409);
+    const { generation, source_owner: source } = initial;
+    const previous = this.queues.get(source) || Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
       check(!this.closing, 'service_unavailable', 503);
-      const binding = this.store.binding(owner);
+      const binding = this.store.connection(owner);
       check(binding?.generation === generation, 'binding_changed', 409);
       const payloadHash = hash(JSON.stringify([generation, text, context || null]));
       const old = this.store.db.prepare('SELECT * FROM outbound WHERE owner=? AND request_id=?').get(owner, id);
@@ -300,26 +339,31 @@ export class Bridge {
         check(old.state === 'accepted', 'previous_send_uncertain_or_failed', 409);
         return { accepted_by_wechat: true, delivery_confirmed: false, duplicate: true };
       }
-      check(binding.error !== 'rebind_required', 'rebind_required', 409);
+      check(binding.transport_error !== 'rebind_required', 'rebind_required', 409);
       const outgoingContext = context ?? binding.credentials.context;
       check(outgoingContext, 'interaction_required', 409);
       const clientId = `wechat-bridge-${randomUUID()}`;
       this.store.db.prepare('INSERT INTO outbound VALUES(?,?,?,?,?,?,?)').run(owner, id, generation, payloadHash, clientId, 'pending', now());
-      const signal = this.workers.get(owner)?.controller.signal;
+      const controller = new AbortController();
+      this.sendControllers.set(owner, controller);
+      const worker = this.workers.get(source);
+      const signal = worker ? AbortSignal.any([controller.signal, worker.controller.signal]) : controller.signal;
       try {
         await this.provider.send(binding.credentials, text, outgoingContext, clientId, signal);
       } catch (error) {
         this.store.db.prepare("UPDATE outbound SET state='uncertain_or_failed' WHERE owner=? AND request_id=? AND generation=? AND state='pending'").run(owner, id, generation);
-        check(this.store.binding(owner)?.generation === generation, 'binding_changed', 409);
+        check(this.store.connection(owner)?.generation === generation, 'binding_changed', 409);
         const code = ['-2', 'interaction_required'].includes(error.code) ? 'interaction_required' : 'send_failed';
-        this.store.setError(owner, generation, code); throw new HttpError(502, code);
+        this.store.setError(owner, generation, code, binding.shared); throw new HttpError(502, code);
+      } finally {
+        if (this.sendControllers.get(owner) === controller) this.sendControllers.delete(owner);
       }
-      check(this.store.binding(owner)?.generation === generation, 'binding_changed', 409);
-      this.store.acceptSend(owner, id, generation);
+      check(this.store.connection(owner)?.generation === generation, 'binding_changed', 409);
+      this.store.acceptSend(owner, id, generation, binding.shared);
       return { accepted_by_wechat: true, delivery_confirmed: false };
     });
-    this.queues.set(owner, operation);
-    try { return await operation; } finally { if (this.queues.get(owner) === operation) this.queues.delete(owner); }
+    this.queues.set(source, operation);
+    try { return await operation; } finally { if (this.queues.get(source) === operation) this.queues.delete(source); }
   }
   async listen(port = this.config.port ?? 8318) {
     await new Promise((done, reject) => { this.server.once('error', reject); this.server.listen(port, '127.0.0.1', done); });
@@ -336,6 +380,7 @@ export class Bridge {
     clearInterval(this.cleanupTimer);
     const closed = new Promise(done => this.server.close(done));
     this.server.closeAllConnections();
+    for (const controller of this.sendControllers.values()) controller.abort();
     const tasks = [...this.logins.values(), ...this.workers.values()].map(value => { value.controller.abort(); return value.task; });
     await Promise.allSettled(tasks);
     await Promise.allSettled([...this.queues.values()]);

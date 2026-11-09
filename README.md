@@ -41,7 +41,7 @@ For host alerts over WeChat, see the optional [Linux resource monitor](examples/
 
 ## Important boundaries
 
-1. **One WeChat account currently has one active application/user binding.** Another application cannot silently take it over. Sharing one personal connection across multiple applications requires an explicit user grant and chat routing design; that feature is not implemented yet. Multiple applications with separate bound accounts are supported by the API and storage model.
+1. **One WeChat account has one primary connection.** In relay mode, the primary user can explicitly delegate new inbound texts to one other application using the binding browser. The primary application can still send its own notifications.
 2. QR authorization establishes a connection. To verify end-to-end messaging, send a message in WeChat and check for the reply on the phone.
 3. ClawBot sending uses conversation context and may require renewed user interaction. This service is not an unconditional, around-the-clock emergency notification channel. Provider quotas, account eligibility and disconnect behavior remain subject to WeChat.
 4. This implementation supports **text**. It recognizes other inbound items but does not download media, transcribe voice, support groups, or grant access to unrelated WeChat conversations.

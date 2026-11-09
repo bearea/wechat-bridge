@@ -358,3 +358,92 @@ test('notification CLI reads stdin and safely retries with the same request ID',
   assert.equal(f.provider.sends.length, 1);
   assert.equal(f.provider.sends.at(-1).text, text);
 });
+
+
+test('shared inbox requires consent and keeps the original application sending alerts', async t => {
+  const f = await fixture(t, 'relay');
+  const generation = f.bind(f.a, 'a');
+  const sourceCookie = f.cookieFor(f.a);
+  const original = f.bridge.store.binding(f.a);
+  const previous = f.receive(f.a, 'a', generation)[0];
+  const invitation = await f.call('/connect/v1/invitations', {
+    token: f.tokenB, data: { user_id: 'same-user-id', reuse_existing: true },
+  });
+  const invite = new URLSearchParams(new URL(invitation.result.url).hash.slice(1)).get('invite');
+  const redeemed = await f.call('/connect/api/session', { cookie: sourceCookie, data: { invite } });
+  const targetCookie = redeemed.headers.get('set-cookie').split(';')[0];
+  assert.equal((await f.call('/connect/api/status', { cookie: targetCookie })).result.share_application, 'B');
+  assert.equal(f.bridge.store.connection(f.b), null);
+  assert.equal((await f.call('/connect/api/share', { cookie: targetCookie, data: {} })).status, 200);
+  const share = f.bridge.store.connection(f.b);
+  assert.ok(share.shared);
+  assert.equal(f.bridge.store.binding(f.a).generation, original.generation);
+  assert.equal(f.bridge.store.binding(f.a).credentials.token, original.credentials.token);
+
+  const messages = [
+    { ...f.message('a', 'buffered'), create_time_ms: share.connected - 1 },
+    f.message('a', 'missing-time'),
+    { ...f.message('a', 'fresh'), create_time_ms: share.connected + 1 },
+  ];
+  const [event] = f.bridge.store.ingest(f.a, generation, messages, 'fresh-cursor');
+  assert.equal(event.messageId, 'fresh');
+  assert.deepEqual(f.bridge.store.events('app-a').map(row => row.id), [previous.id]);
+  assert.deepEqual(f.bridge.store.events('app-b').map(row => row.id), [event.id]);
+  const reply = `/connect/v1/events/${event.id}/reply`;
+  const payload = { text: 'Glean answer', request_id: 'reply-1' };
+  assert.equal((await f.call(reply, { token: f.tokenA, data: payload })).status, 404);
+  assert.equal((await f.call(reply, { token: f.tokenB, data: payload })).status, 200);
+  assert.equal((await f.call('/connect/v1/users/same-user-id/send', {
+    token: f.tokenA, data: { text: 'resource alert', request_id: 'alert-1' },
+  })).status, 200);
+  assert.equal(f.provider.sends.length, 2);
+
+  assert.equal((await f.call('/connect/v1/users/same-user-id/unbind', { token: f.tokenB, data: {} })).status, 200);
+  assert.equal(f.bridge.store.connection(f.b), null);
+  assert.ok(f.bridge.store.binding(f.a));
+  assert.deepEqual(f.bridge.store.events('app-b'), []);
+  assert.equal(f.bridge.store.ingest(f.a, generation, [messages[2]], 'new-cursor').length, 0);
+  assert.equal((await f.call('/connect/api/status', { cookie: targetCookie })).status, 401);
+});
+
+test('a share requires a current source session and cannot cross a rebind', async t => {
+  const f = await fixture(t, 'relay');
+  f.bind(f.a, 'a');
+  const source = f.cookieFor(f.a);
+  const noProof = f.bridge.store.redeem(f.bridge.store.invitation(f.b, true));
+  assert.equal((await f.call('/connect/api/share', {
+    cookie: '__Secure-wechat_bridge=' + noProof, data: {},
+  })).status, 409);
+  const session = f.bridge.store.redeem(f.bridge.store.invitation(f.b, true), source.split('=')[1]);
+  const cookie = '__Secure-wechat_bridge=' + session;
+  f.bind(f.a, 'replacement');
+  assert.equal((await f.call('/connect/api/share', { cookie, data: {} })).status, 409);
+  assert.equal(f.bridge.store.connection(f.b), null);
+});
+
+test('notifications can be fenced to the intended connection', async t => {
+  const f = await fixture(t);
+  const first = f.bind(f.a, 'a');
+  f.receive(f.a, 'a', first);
+  const second = f.bind(f.a, 'new');
+  f.receive(f.a, 'new', second);
+  const response = await f.call('/connect/v1/users/same-user-id/send', {
+    token: f.tokenA, data: { text: 'private notification', request_id: 'echo-1', connection_id: first },
+  });
+  assert.equal(response.result.error, 'binding_changed');
+  assert.equal(f.provider.sends.length, 0);
+});
+
+
+test('the primary owner can revoke an inbox without unlinking its transport', async t => {
+  const f = await fixture(t, 'relay');
+  const generation = f.bind(f.a, 'a');
+  f.receive(f.a, 'a', generation);
+  const cookie = f.cookieFor(f.a);
+  const session = f.bridge.store.redeem(f.bridge.store.invitation(f.b, true), cookie.split('=')[1]);
+  assert.equal(f.bridge.store.grant(session, f.b), true);
+  assert.equal((await f.call('/connect/api/revoke-share', { cookie, data: {} })).status, 200);
+  assert.equal(f.bridge.store.connection(f.b), null);
+  assert.equal(f.bridge.store.binding(f.a).generation, generation);
+  assert.equal((await f.bridge.send(f.a, 'resource alert', 'alert-after-revoke')).accepted_by_wechat, true);
+});

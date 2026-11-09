@@ -42,6 +42,12 @@ Switch configuration `mode` to `relay` and restart only when the consumer is rea
 
 For automated notifications, use the `send` command shown in the [API instructions](API.md). Run it where the application credential is available, and reuse the same request ID when retrying one notification.
 
+### Reuse an existing connection
+
+Set the bridge to relay mode. Open the primary application's binding page in the same browser that will open the new application's invitation. If the primary browser session expired, issue a new primary invitation for the same user and open it to restore that session. The existing binding stays connected during this step.
+
+Open the new application's invitation and approve its named request to use the connection. The primary application keeps sending its own notifications. Only the approved application sees new inbound texts with a provider timestamp later than the approval. Either application's binding page can revoke the share without removing the primary connection.
+
 ## Operation and rollback
 
 Existing authorized connections carry over on upgrade, including connections left waiting for the old confirmation step. The migration preserves their credentials, conversation context, and message timestamps.
