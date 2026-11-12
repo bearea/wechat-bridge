@@ -414,14 +414,19 @@ export class Bridge {
       const old = this.store.db.prepare('SELECT * FROM outbound WHERE owner=? AND request_id=?').get(owner, id);
       if (old) {
         check(old.payload_hash === payloadHash && old.generation === generation, 'request_id_conflict', 409);
-        check(old.state === 'accepted', 'previous_send_uncertain_or_failed', 409);
-        return { accepted_by_wechat: true, delivery_confirmed: false, duplicate: true };
+        if (old.state === 'accepted') return { accepted_by_wechat: true, delivery_confirmed: false, duplicate: true };
+        check(old.state === 'interaction_required', 'previous_send_uncertain_or_failed', 409);
+        check(binding.last_inbound > old.created, 'interaction_required', 409);
       }
       check(binding.transport_error !== 'rebind_required', 'rebind_required', 409);
       const outgoingContext = context ?? binding.credentials.context;
       check(outgoingContext, 'interaction_required', 409);
-      const clientId = `wechat-bridge-${randomUUID()}`;
-      this.store.db.prepare('INSERT INTO outbound VALUES(?,?,?,?,?,?,?)').run(owner, id, generation, payloadHash, clientId, 'pending', now());
+      const clientId = old?.client_id ?? `wechat-bridge-${randomUUID()}`;
+      if (old) {
+        this.store.db.prepare("UPDATE outbound SET state='pending',created=? WHERE owner=? AND request_id=?").run(now(), owner, id);
+      } else {
+        this.store.db.prepare('INSERT INTO outbound VALUES(?,?,?,?,?,?,?)').run(owner, id, generation, payloadHash, clientId, 'pending', now());
+      }
       const controller = new AbortController();
       this.sendControllers.set(owner, controller);
       const worker = this.workers.get(source);
@@ -429,9 +434,11 @@ export class Bridge {
       try {
         await this.provider.send(binding.credentials, text, outgoingContext, clientId, signal);
       } catch (error) {
-        this.store.db.prepare("UPDATE outbound SET state='uncertain_or_failed' WHERE owner=? AND request_id=? AND generation=? AND state='pending'").run(owner, id, generation);
-        check(this.store.connection(owner)?.generation === generation, 'binding_changed', 409);
         const code = ['-2', 'interaction_required'].includes(error.code) ? 'interaction_required' : 'send_failed';
+        // Only proactive sends can use new conversation context. Explicit replies are pinned to their event.
+        const state = code === 'interaction_required' && context === undefined ? code : 'uncertain_or_failed';
+        this.store.db.prepare("UPDATE outbound SET state=? WHERE owner=? AND request_id=? AND generation=? AND state='pending'").run(state, owner, id, generation);
+        check(this.store.connection(owner)?.generation === generation, 'binding_changed', 409);
         this.store.setError(owner, generation, code, binding.shared); throw new HttpError(502, code);
       } finally {
         if (this.sendControllers.get(owner) === controller) this.sendControllers.delete(owner);

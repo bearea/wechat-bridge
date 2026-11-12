@@ -167,6 +167,27 @@ test('uncertain sends cannot be blindly replayed', async t => {
   await assert.rejects(f.bridge.send(f.a, 'notification', 'request-1', 'context-a'), /previous_send_uncertain_or_failed/);
   assert.equal(f.provider.sends.length, 0);
 });
+test('a rejected proactive send retries only after fresh inbound context', async t => {
+  const f = await fixture(t); const generation = f.bind(f.a, 'a');
+  f.receive(f.a, 'a', generation);
+  f.provider.failure = '-2';
+  await assert.rejects(f.bridge.send(f.a, 'daily Echo', 'echo-1'), /interaction_required/);
+  const rejected = f.bridge.store.db.prepare('SELECT * FROM outbound WHERE owner=? AND request_id=?').get(f.a, 'echo-1');
+  assert.equal(rejected.state, 'interaction_required');
+  await f.restart();
+  f.provider.failure = null;
+  await assert.rejects(f.bridge.send(f.a, 'daily Echo', 'echo-1'), /interaction_required/);
+  assert.equal(f.provider.sends.length, 0);
+
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const inbound = { ...f.message('a', 'm2'), context_token: 'fresh-context' };
+  f.bridge.store.ingest(f.a, generation, [inbound], 'fresh-cursor');
+  assert.equal((await f.bridge.send(f.a, 'daily Echo', 'echo-1')).accepted_by_wechat, true);
+  assert.equal((await f.bridge.send(f.a, 'daily Echo', 'echo-1')).duplicate, true);
+  assert.equal(f.provider.sends.length, 1);
+  assert.equal(f.provider.sends[0].context, 'fresh-context');
+  assert.equal(f.provider.sends[0].id, rejected.client_id);
+});
 test('cross-application event access and replies are rejected', async t => {
   const f = await fixture(t); const generation = f.bind(f.a, 'a');
   const [event] = f.receive(f.a, 'a', generation);
